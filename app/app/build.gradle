@@ -1,0 +1,12 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.example.floatingassistant'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.example.floatingassistant'
+        minSdk 23
+        targetSdk 28
+        versionCode 2
+        versionName '1.1'
+    }
+}
