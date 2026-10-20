@@ -1,0 +1,33 @@
+راهنمای Termux (گوشی اندروید)
+
+نکته: Termux برای باز کردن ZIP و نگهداری سورس مناسب است؛ ساخت APK اندروید به Android SDK/Build Tools نیاز دارد و در Termux معمولی آماده نیست. این سورس را می‌توان با Android Studio یا سرویس ساخت اندروید ساخت.
+
+۱) ZIP را از لینک دانلود کن و در پوشهٔ Download ذخیره کن.
+۲) Termux را باز کن و دقیقاً این دستورها را یکی‌یکی بزن:
+
+termux-setup-storage
+pkg update
+pkg install unzip -y
+mkdir -p ~/projects
+cp ~/storage/downloads/FloatingAssistant_Full.zip ~/projects/
+cd ~/projects
+unzip -o FloatingAssistant_Full.zip
+cd FloatingAssistant_Full
+
+اگر اسم فایل دانلودی فرق دارد، اسم واقعی را با این دستور ببین:
+ls ~/storage/downloads
+
+برای دیدن فایل‌های پروژه:
+ls
+find app -type f
+
+ساخت APK:
+- راه مطمئن: پوشهٔ پروژه را به کامپیوتر منتقل کن و با Android Studio باز کن؛ سپس Build > Build APK(s).
+- اگر فقط گوشی داری، می‌توانی پروژه را در GitHub قرار بدهی و با GitHub Actions فایل APK بسازی، اما باید workflow مخصوص Android تنظیم شود.
+- صرفاً نصب `gradle` در Termux کافی نیست؛ Android SDK و platform/build-tools مناسب هم لازم است.
+
+ویژگی‌های نسخه:
+- پنجرهٔ چت شناور قابل جابه‌جایی
+- ورودی متنی فارسی و کیبورد گوشی
+- باز کردن Google، YouTube، تنظیمات، Wi‑Fi و Bluetooth
+- این نسخه هنوز هوش مصنوعی آنلاین ندارد و نمی‌تواند VPN را مستقیم خاموش کند.
