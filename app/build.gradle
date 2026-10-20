@@ -7,7 +7,7 @@ android {
         applicationId 'com.example.floatingassistant'
         minSdk 23
         targetSdk 28
-        versionCode 5
-        versionName '1.4-offline'
+        versionCode 6
+        versionName '2.0-agent'
     }
 }

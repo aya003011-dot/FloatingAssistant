@@ -1,6 +1,11 @@
 package com.example.floatingassistant;
 
 import android.app.Service;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -15,6 +20,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.IBinder;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -27,11 +33,16 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
 public class FloatingService extends Service {
     private WindowManager wm;
@@ -40,8 +51,22 @@ public class FloatingService extends Service {
     private WindowManager.LayoutParams params;
     private WindowManager.LayoutParams bubbleParams;
     private LinearLayout messages;
+    private ScrollView chatScroll;
     private EditText input;
+    private LinearLayout confirmationRow;
+    private Button approveSendButton;
+    private Button continueWithoutSendButton;
+    private Button voiceButton;
+    private SpeechRecognizer speechRecognizer;
+    private boolean listeningForVoice = false;
     private boolean panelVisible = false;
+    private boolean taskBusy = false;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Deque<CommandPlanner.Step> commandQueue = new ArrayDeque<>();
+    private boolean waitingForSendConfirmation = false;
+    private boolean waitingForManualSend = false;
+    private String pendingRecipient = "";
+    private String pendingMessage = "";
     private int panelWidth = 320, panelHeight = 450;
     private static volatile FloatingService instance;
 
@@ -50,6 +75,7 @@ public class FloatingService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         instance = this;
+        startKeepAliveNotification();
         wm = (WindowManager)getSystemService(WINDOW_SERVICE);
         if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) { stopSelf(); return; }
         createWindow();
@@ -93,20 +119,32 @@ public class FloatingService extends Service {
         });
         root.addView(header);
 
-        ScrollView scroll = new ScrollView(this);
+        chatScroll = new ScrollView(this);
         messages = new LinearLayout(this); messages.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(messages); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        addMessage("دستیار", "سلام! ✦ فرمان‌های ساده و پاسخ‌های پایه آفلاین کار می‌کنن. برای صحبت صوتی روی 🎙 بزن؛ یک بار شروع و بار دوم پایان رو بزن. نمونه: «برو تلگرام»، «صدا رو زیاد کن»، «حاصل ۲ + ۳»، «ساعت چنده»، «سرچ کن آخرین اخبار». برای پاسخ آزاد شبیه ChatGPT باید مدل جداگانه دانلود بشه. ◉ پنجره رو مخفی می‌کنه و ✦ برمی‌گردونه.");
+        chatScroll.addView(messages); root.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        addMessage("دستیار", "سلام! ✦ حالا می‌تونی چند کار رو پشت‌سرهم بگی؛ مثلاً «برو تیک‌تاک، داخل خودش جوجوتسو رو سرچ کن» یا «برو تلگرام به علی بگو سلام، بعد برو تیک‌تاک جوجوتسو رو سرچ کن». میکروفون همین‌جا داخل پنجره شناوره. برای کلیک و تایپ خودکار داخل برنامه‌ها، دسترس‌پذیری رو در تنظیمات فعال کن. پیام خروجی قبل از ارسال برای تأیید بهت نشون داده می‌شه.");
 
         LinearLayout entry = new LinearLayout(this); entry.setOrientation(LinearLayout.HORIZONTAL);
         input = new EditText(this); input.setSingleLine(true); input.setTextSize(14); input.setHint("دستورت رو بنویس...");
         input.setTextColor(0xFF111111); input.setBackgroundColor(0xFFFFFFFF);
         entry.addView(input, new LinearLayout.LayoutParams(0, dp(48), 1));
-        Button voice = new Button(this); voice.setText("🎙"); voice.setMinWidth(0); voice.setPadding(0,0,0,0);
-        voice.setOnClickListener(v -> { try { Intent i = new Intent(this, VoiceCommandActivity.class); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); } catch(Exception e) { addMessage("دستیار", "ورودی صوتی باز نشد. می‌تونی دستور رو تایپ کنی."); } });
-        entry.addView(voice, new LinearLayout.LayoutParams(dp(50), dp(48)));
+        voiceButton = new Button(this); voiceButton.setText("🎙"); voiceButton.setMinWidth(0); voiceButton.setPadding(0,0,0,0);
+        voiceButton.setContentDescription("شروع فرمان صوتی در پنجره شناور");
+        voiceButton.setOnClickListener(v -> toggleInlineVoice());
+        entry.addView(voiceButton, new LinearLayout.LayoutParams(dp(50), dp(48)));
         Button send = new Button(this); send.setText("ارسال"); send.setOnClickListener(v -> { String s=input.getText().toString().trim(); if(s.isEmpty())return; input.setText(""); addMessage("تو",s); handle(s); });
         entry.addView(send, new LinearLayout.LayoutParams(dp(68), dp(48))); root.addView(entry);
+
+        confirmationRow = new LinearLayout(this);
+        confirmationRow.setOrientation(LinearLayout.HORIZONTAL);
+        confirmationRow.setVisibility(View.GONE);
+        approveSendButton = new Button(this); approveSendButton.setText("تأیید ارسال"); approveSendButton.setTextSize(11);
+        approveSendButton.setOnClickListener(v -> approvePendingSend());
+        continueWithoutSendButton = new Button(this); continueWithoutSendButton.setText("لغو / ادامه"); continueWithoutSendButton.setTextSize(11);
+        continueWithoutSendButton.setOnClickListener(v -> cancelPendingSendAndContinue());
+        confirmationRow.addView(approveSendButton, new LinearLayout.LayoutParams(0, dp(42), 1));
+        confirmationRow.addView(continueWithoutSendButton, new LinearLayout.LayoutParams(0, dp(42), 1));
+        root.addView(confirmationRow);
 
         LinearLayout quick = new LinearLayout(this); quick.setOrientation(LinearLayout.HORIZONTAL);
         addQuick(quick,"گالری","برو گالری"); addQuick(quick,"تلگرام","برو تلگرام"); addQuick(quick,"تیک‌تاک","برو تیک‌تاک"); addQuick(quick,"گوگل","گوگل");
@@ -154,11 +192,368 @@ public class FloatingService extends Service {
 
     private void addMessage(String who,String msg) {
         if(messages==null)return; TextView t=new TextView(this); t.setText(who+": "+msg); t.setTextColor(0xFFFFFFFF); t.setTextSize(13); t.setPadding(dp(7),dp(7),dp(7),dp(7)); messages.addView(t);
+        if (chatScroll != null) chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
     }
     private String normalize(String value) { String s=value.toLowerCase(Locale.ROOT).replace('ي','ی').replace('ك','ک').replace('‌',' ').trim(); return s.replaceAll("\\s+"," "); }
     private String correctCommonTypos(String s) { String[][] fixes={{"aneim","anime"},{"animi","anime"},{"animé","anime"},{"anme","anime"},{"animie","anime"},{"joojo","jojo"},{"jojutsu","jujutsu"},{"jujtsu","jujutsu"},{"you tube","youtube"},{"tik tok","tiktok"},{"تیک تاک","تیک‌تاک"}}; for(String[] f:fixes)s=s.replace(f[0],f[1]); return s; }
 
     private void handle(String raw) {
+        List<CommandPlanner.Step> plan = CommandPlanner.plan(raw);
+        if (plan == null || plan.isEmpty()) { addMessage("دستیار", "فرمان خالیه."); return; }
+        if (taskBusy || !commandQueue.isEmpty() || waitingForSendConfirmation || waitingForManualSend) {
+            addMessage("دستیار", "دارم کار قبلی رو انجام می‌دم؛ صبر کن یا اول تصمیم ارسال پیام قبلی رو مشخص کن.");
+            return;
+        }
+        taskBusy = true;
+        for (CommandPlanner.Step step : plan) commandQueue.addLast(step);
+        runNextPlannedStep();
+    }
+
+    private void startKeepAliveNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel channel = new NotificationChannel("floating_assistant", "دستیار شناور", NotificationManager.IMPORTANCE_LOW);
+                channel.setDescription("برای فعال ماندن پنجرهٔ شناور و فرمان صوتی");
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) nm.createNotificationChannel(channel);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            PendingIntent pi = PendingIntent.getActivity(this, 0, open,
+                    (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0) | PendingIntent.FLAG_UPDATE_CURRENT);
+            Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, "floating_assistant") : new Notification.Builder(this);
+            b.setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                    .setContentTitle("دستیار شناور فعاله")
+                    .setContentText("برای فرمان صوتی روی 🎙 داخل پنجره بزن")
+                    .setContentIntent(pi).setOngoing(true).setOnlyAlertOnce(true);
+            startForeground(701, b.build());
+        } catch (Exception ignored) { }
+    }
+
+    private void toggleInlineVoice() {
+        if (listeningForVoice) {
+            try { if (speechRecognizer != null) speechRecognizer.stopListening(); }
+            catch (Exception ignored) { finishVoiceError("توقف ضبط ممکن نشد."); }
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            addMessage("دستیار", "برای استفاده از میکروفون، برنامه رو باز کن و از دکمهٔ «اجازهٔ میکروفون» مجوز رو بده؛ بعد برگرد و دوباره روی 🎙 بزن.");
+            try { Intent i = new Intent(this, MainActivity.class); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); }
+            catch (Exception ignored) { }
+            return;
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            addMessage("دستیار", "سرویس تشخیص گفتار روی این گوشی در دسترس نیست. سرویس گفتار Google/Android رو نصب یا فعال کن؛ فعلاً می‌تونی تایپ کنی.");
+            return;
+        }
+        try {
+            releaseSpeechRecognizer();
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplicationContext());
+            speechRecognizer.setRecognitionListener(new RecognitionListener() {
+                @Override public void onReadyForSpeech(Bundle params) { setVoiceState(true, "گوش می‌دم… بعد از تمام‌شدن حرفت، فرمان اجرا می‌شه."); }
+                @Override public void onBeginningOfSpeech() { setVoiceState(true, "در حال شنیدن فرمان…"); }
+                @Override public void onRmsChanged(float rmsdB) { }
+                @Override public void onBufferReceived(byte[] buffer) { }
+                @Override public void onEndOfSpeech() { setVoiceState(true, "گفتار تموم شد؛ دارم متن رو آماده می‌کنم…"); }
+                @Override public void onError(int error) {
+                    if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        finishVoiceError("گفتارت رو تشخیص ندادم؛ دوباره بزن یا دستور رو تایپ کن.");
+                    } else finishVoiceError("تشخیص گفتار متوقف شد. اتصال و سرویس گفتار گوشی رو بررسی کن.");
+                }
+                @Override public void onResults(Bundle results) {
+                    ArrayList<String> matches = results == null ? null : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    String recognized = matches == null || matches.isEmpty() ? "" : matches.get(0).trim();
+                    setVoiceState(false, "آماده‌ام.");
+                    releaseSpeechRecognizer();
+                    if (recognized.isEmpty()) addMessage("دستیار", "چیزی تشخیص داده نشد؛ دوباره تلاش کن.");
+                    else {
+                        addMessage("تو 🎙", recognized);
+                        handle(recognized);
+                    }
+                }
+                @Override public void onPartialResults(Bundle partialResults) {
+                    ArrayList<String> matches = partialResults == null ? null : partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    if (matches != null && !matches.isEmpty() && !matches.get(0).trim().isEmpty())
+                        setVoiceState(true, "شنیدم: «" + matches.get(0).trim() + "»");
+                }
+                @Override public void onEvent(int eventType, Bundle params) { }
+            });
+            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR");
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fa-IR");
+            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+            // Do not force offline mode: some phones do not have an offline Persian speech model.
+            speechRecognizer.startListening(intent);
+            setVoiceState(true, "دارم میکروفون رو آماده می‌کنم…");
+        } catch (Exception e) { finishVoiceError("شروع میکروفون نشد؛ دسترسی میکروفون و سرویس گفتار رو بررسی کن."); }
+    }
+
+    private void setVoiceState(boolean active, String status) {
+        listeningForVoice = active;
+        if (voiceButton != null) {
+            voiceButton.setText(active ? "⏹" : "🎙");
+            voiceButton.setContentDescription(active ? "توقف فرمان صوتی" : "شروع فرمان صوتی در پنجره شناور");
+        }
+        if (status != null && !status.isEmpty()) addMessage("میکروفون", status);
+    }
+    private void finishVoiceError(String message) {
+        setVoiceState(false, message);
+        releaseSpeechRecognizer();
+    }
+    private void releaseSpeechRecognizer() {
+        if (speechRecognizer != null) {
+            try { speechRecognizer.cancel(); } catch (Exception ignored) { }
+            try { speechRecognizer.destroy(); } catch (Exception ignored) { }
+            speechRecognizer = null;
+        }
+        listeningForVoice = false;
+        if (voiceButton != null) voiceButton.setText("🎙");
+    }
+
+    private void runNextPlannedStep() {
+        if (waitingForSendConfirmation || waitingForManualSend) return;
+        CommandPlanner.Step step = commandQueue.pollFirst();
+        if (step == null) { taskBusy = false; return; }
+        switch (step.type) {
+            case LOCAL:
+                handleLegacy(step.original);
+                mainHandler.postDelayed(this::runNextPlannedStep, 650);
+                return;
+            case OPEN_APP:
+                boolean opened = launchPlannedApp(step.app);
+                if (!opened) addMessage("دستیار", "نتونستم برنامهٔ «" + step.app + "» رو پیدا کنم. مطمئن شو نصب شده و اسمش رو دقیق‌تر بگو.");
+                mainHandler.postDelayed(this::runNextPlannedStep, opened ? 900 : 350);
+                return;
+            case SEARCH_APP:
+                openAppForSearch(step);
+                return;
+            case SEND_TELEGRAM:
+                prepareTelegramMessage(step);
+                return;
+            case VPN_ON:
+                runVpnAction(true, step.app);
+                return;
+            case VPN_OFF:
+                runVpnAction(false, step.app);
+                return;
+            case CLOSE_CURRENT:
+                if (AssistantAccessibilityService.goHome()) addMessage("دستیار", "از برنامه خارج شدم و به صفحهٔ اصلی برگشتم. اندروید اجازهٔ بستن اجباری هر برنامه رو نمی‌ده.");
+                else { try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); addMessage("دستیار", "به صفحهٔ اصلی برگشتم."); } catch (Exception e) { addMessage("دستیار", "نتونستم از برنامه خارج بشم."); } }
+                mainHandler.postDelayed(this::runNextPlannedStep, 650);
+                return;
+            case HOME:
+                if (!AssistantAccessibilityService.goHome()) { try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); } catch (Exception ignored) { } }
+                addMessage("دستیار", "به صفحهٔ اصلی برگشتم."); mainHandler.postDelayed(this::runNextPlannedStep, 650); return;
+            case BACK:
+                if (!AssistantAccessibilityService.goBack()) addMessage("دستیار", "برای برگشت خودکار، سرویس دسترس‌پذیری باید فعال باشه.");
+                mainHandler.postDelayed(this::runNextPlannedStep, 450); return;
+            default:
+                mainHandler.postDelayed(this::runNextPlannedStep, 500);
+        }
+    }
+
+    private boolean launchPlannedApp(String app) {
+        String a = normalize(app);
+        if (a.contains("تنظیمات")) return openSettings(new Intent(Settings.ACTION_SETTINGS), "تنظیمات باز شد.");
+        if (a.contains("یوتیوب")) { openAppOrUrl("com.google.android.youtube", "https://www.youtube.com", "یوتیوب رو باز کردم."); return true; }
+        if (a.contains("گالری")) return tryLaunchByAliases(new String[]{"gallery", "گالری", "photos", "تصاویر", "عکس‌ها"}) || launchPackage("com.google.android.apps.photos");
+        if (a.contains("تیک")) return tryLaunchByAliases(new String[]{"tiktok", "تیک‌تاک", "تیک تاک"});
+        if (a.contains("تلگرام")) return tryLaunchByAliases(new String[]{"telegram", "تلگرام"});
+        if (a.contains("اینستاگرام")) return tryLaunchByAliases(new String[]{"instagram", "اینستاگرام", "اینستا"});
+        if (a.contains("واتساپ")) return tryLaunchByAliases(new String[]{"whatsapp", "واتساپ", "واتس اپ"});
+        if (a.equals("chrome") || a.contains("کروم")) return tryLaunchByAliases(new String[]{"Chrome", "کروم"});
+        if (a.contains("دوربین")) return openSettings(new Intent("android.media.action.IMAGE_CAPTURE"), "دوربین باز شد.");
+        if (a.contains("vpn")) return tryLaunchByAliases(new String[]{app, "VPN Star", "vpnstar", "Proton VPN", "1.1.1.1"});
+        return tryLaunchByAliases(new String[]{app});
+    }
+
+    private void openAppForSearch(CommandPlanner.Step step) {
+        String app = step.app;
+        if (!AssistantAccessibilityService.isEnabled()) {
+            addMessage("دستیار", "برای جست‌وجو داخل خود برنامه، اول سرویس دسترس‌پذیری رو از تنظیمات فعال کن. فعلاً لینک جست‌وجو رو باز می‌کنم.");
+            openSearchDeepLink(step);
+            mainHandler.postDelayed(this::runNextPlannedStep, 1500);
+            return;
+        }
+        boolean opened;
+        if (app.contains("تیک")) opened = tryLaunchByAliases(new String[]{"tiktok", "تیک‌تاک", "تیک تاک"});
+        else if (app.contains("یوتیوب")) opened = tryLaunchByAliases(new String[]{"YouTube", "یوتیوب"});
+        else if (app.contains("تلگرام")) opened = tryLaunchByAliases(new String[]{"Telegram", "تلگرام"});
+        else opened = tryLaunchByAliases(new String[]{app});
+        if (!opened) { addMessage("دستیار", "برنامهٔ «" + app + "» نصب نیست یا پیدا نشد."); mainHandler.postDelayed(this::runNextPlannedStep, 500); return; }
+        addMessage("دستیار", "برنامه باز شد؛ دارم جست‌وجوی داخل خودش رو انجام می‌دم: «" + step.query + "».");
+        mainHandler.postDelayed(() -> {
+            String[] searchText = searchEntryLabels(app);
+            boolean clicked = AssistantAccessibilityService.clickAnyContentDescription(searchText);
+            if (!clicked) clicked = AssistantAccessibilityService.clickAnyVisibleText(searchText);
+            if (!clicked) {
+                addMessage("دستیار", "دکمهٔ جست‌وجو در این نسخهٔ برنامه پیدا نشد؛ دارم لینک جست‌وجوی همون برنامه رو امتحان می‌کنم.");
+                openSearchDeepLink(step);
+                mainHandler.postDelayed(this::runNextPlannedStep, 1400);
+                return;
+            }
+            mainHandler.postDelayed(() -> {
+                boolean focused = AssistantAccessibilityService.focusFirstEditable();
+                boolean typed = AssistantAccessibilityService.setFocusedText(step.query);
+                if (!typed && focused) typed = AssistantAccessibilityService.setFocusedText(step.query);
+                if (!typed) {
+                    addMessage("دستیار", "صفحهٔ جست‌وجو باز شد اما کادر جست‌وجو رو پیدا نکردم. عبارت رو داخل خود برنامه وارد کن؛ به نتیجهٔ گوگل نرفتم.");
+                    mainHandler.postDelayed(this::runNextPlannedStep, 1000);
+                    return;
+                }
+                mainHandler.postDelayed(() -> {
+                    boolean submitted = AssistantAccessibilityService.performSearchImeAction();
+                    if (!submitted) submitted = AssistantAccessibilityService.clickAnyContentDescription("Search", "Search now", "جستجو", "سرچ", "Search for");
+                    if (!submitted) submitted = AssistantAccessibilityService.clickAnyVisibleText("جستجو", "سرچ", "Search");
+                    addMessage("دستیار", submitted ? "عبارت داخل «" + app + "» ارسال شد." : "عبارت داخل کادر جست‌وجوی «" + app + "» نوشته شد؛ اگر نتیجه ظاهر نشد، دکمهٔ جست‌وجو/Enter رو بزن.");
+                    mainHandler.postDelayed(this::runNextPlannedStep, 1200);
+                }, 500);
+            }, 800);
+        }, 1300);
+    }
+
+    private String[] searchEntryLabels(String app) {
+        if (app.contains("تیک")) return new String[]{"Search", "Search videos", "جستجو", "سرچ", "Search TikTok", "Discover", "Explore"};
+        if (app.contains("یوتیوب")) return new String[]{"Search", "جستجو", "Search YouTube", "Search YouTube"};
+        if (app.contains("تلگرام")) return new String[]{"Search", "جستجو", "Search chats", "Search messages", "جستجوی چت‌ها"};
+        return new String[]{"Search", "جستجو", "سرچ"};
+    }
+
+    private void openSearchDeepLink(CommandPlanner.Step step) {
+        String url;
+        String pkg = null;
+        if (step.app.contains("تیک")) { url = "https://www.tiktok.com/search?q=" + Uri.encode(step.query); pkg = "com.zhiliaoapp.musically"; }
+        else if (step.app.contains("یوتیوب")) { url = "https://www.youtube.com/results?search_query=" + Uri.encode(step.query); pkg = "com.google.android.youtube"; }
+        else if (step.app.contains("تلگرام")) { url = "https://t.me/" + Uri.encode(step.query); }
+        else { url = "https://www.google.com/search?q=" + Uri.encode(step.query); }
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            if (pkg != null && getPackageManager().getLaunchIntentForPackage(pkg) != null) i.setPackage(pkg);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) { openUrl(url, "لینک جست‌وجو باز شد."); }
+    }
+
+    private void prepareTelegramMessage(CommandPlanner.Step step) {
+        if (!AssistantAccessibilityService.isEnabled()) {
+            addMessage("دستیار", "برای پیدا کردن مخاطب و تایپ خودکار پیام، دسترس‌پذیری باید فعال باشه. تلگرام رو باز می‌کنم؛ لطفاً مخاطب «" + step.recipient + "» رو باز کن و پیام رو خودت ارسال کن.");
+            tryLaunchByAliases(new String[]{"Telegram", "تلگرام"});
+            stopPlannedQueue();
+            return;
+        }
+        if (!tryLaunchByAliases(new String[]{"Telegram", "تلگرام"})) {
+            addMessage("دستیار", "تلگرام پیدا نشد؛ مطمئن شو نصب شده."); stopPlannedQueue(); return;
+        }
+        addMessage("دستیار", "دارم مخاطب «" + step.recipient + "» رو پیدا می‌کنم.");
+        mainHandler.postDelayed(() -> {
+            boolean searchClicked = AssistantAccessibilityService.clickAnyContentDescription("Search", "جستجو", "Search chats", "Search messages");
+            if (!searchClicked) searchClicked = AssistantAccessibilityService.clickAnyVisibleText("جستجو", "Search", "Search chats");
+            if (!searchClicked) {
+                addMessage("دستیار", "دکمهٔ جست‌وجوی تلگرام پیدا نشد. مخاطب رو دستی باز کن؛ برای جلوگیری از ارسال به فرد اشتباه، ارسال خودکار رو متوقف کردم."); stopPlannedQueue(); return;
+            }
+            mainHandler.postDelayed(() -> {
+                AssistantAccessibilityService.focusFirstEditable();
+                boolean typed = AssistantAccessibilityService.setFocusedText(step.recipient);
+                if (!typed) {
+                    addMessage("دستیار", "کادر جست‌وجوی مخاطب پیدا نشد. خودت مخاطب رو جست‌وجو کن؛ ادامهٔ ارسال متوقف شد."); stopPlannedQueue(); return;
+                }
+                mainHandler.postDelayed(() -> {
+                    AssistantAccessibilityService.performSearchImeAction();
+                    mainHandler.postDelayed(() -> {
+                        boolean picked = AssistantAccessibilityService.clickExactVisibleText(step.recipient);
+                        if (!picked) picked = AssistantAccessibilityService.clickVisibleText(step.recipient);
+                        if (!picked) {
+                            addMessage("دستیار", "مخاطب «" + step.recipient + "» رو نتونستم با اطمینان باز کنم. برای جلوگیری از ارسال به فرد اشتباه، ادامهٔ پیام خودکار متوقف شد."); stopPlannedQueue(); return;
+                        }
+                        mainHandler.postDelayed(() -> {
+                            boolean editor = AssistantAccessibilityService.clickAnyContentDescription("Message", "پیام", "Write a message", "نوشتن پیام");
+                            if (!editor) editor = AssistantAccessibilityService.focusFirstEditable();
+                            boolean typedMessage = AssistantAccessibilityService.setFocusedText(step.message);
+                            if (!typedMessage && editor) typedMessage = AssistantAccessibilityService.setFocusedText(step.message);
+                            if (!typedMessage) {
+                                addMessage("دستیار", "چت باز شد اما کادر پیام پیدا نشد؛ پیام رو دستی بنویس. ادامهٔ زنجیره متوقف شد."); stopPlannedQueue(); return;
+                            }
+                            pendingRecipient = step.recipient;
+                            pendingMessage = step.message;
+                            waitingForSendConfirmation = true;
+                            if (confirmationRow != null) confirmationRow.setVisibility(View.VISIBLE);
+                            addMessage("دستیار", "پیام برای «" + pendingRecipient + "» آماده شد:\n«" + pendingMessage + "»\nمتن و مخاطب رو بررسی کن و فقط اگر درسته «تأیید ارسال» رو بزن.");
+                        }, 750);
+                    }, 750);
+                }, 600);
+            }, 700);
+        }, 1200);
+    }
+
+    private void approvePendingSend() {
+        if (!waitingForSendConfirmation) return;
+        boolean sent = AssistantAccessibilityService.clickAnyContentDescription("Send", "ارسال", "Send message", "ارسال پیام");
+        if (!sent) sent = AssistantAccessibilityService.clickAnyVisibleText("ارسال", "Send message", "Send");
+        if (sent) {
+            addMessage("دستیار", "درخواست ارسال به «" + pendingRecipient + "» انجام شد. دارم کار بعدی رو ادامه می‌دم.");
+            clearPendingSend();
+            mainHandler.postDelayed(this::runNextPlannedStep, 750);
+        } else {
+            waitingForSendConfirmation = false;
+            waitingForManualSend = true;
+            approveSendButton.setText("بررسی دوبارهٔ ارسال");
+            addMessage("دستیار", "دکمهٔ ارسال پیدا نشد. اگر پیام رو خودت ارسال کردی یا می‌خوای از ارسال صرف‌نظر کنی، «لغو / ادامه» رو بزن. از روی این پیام نمی‌تونم مطمئن بشم ارسال شده.");
+        }
+    }
+
+    private void cancelPendingSendAndContinue() {
+        if (!waitingForSendConfirmation && !waitingForManualSend) return;
+        addMessage("دستیار", "ارسال خودکار متوقف شد؛ کار بعدی رو ادامه می‌دم.");
+        clearPendingSend();
+        mainHandler.postDelayed(this::runNextPlannedStep, 500);
+    }
+    private void clearPendingSend() {
+        waitingForSendConfirmation = false;
+        waitingForManualSend = false;
+        pendingRecipient = "";
+        pendingMessage = "";
+        if (confirmationRow != null) confirmationRow.setVisibility(View.GONE);
+        if (approveSendButton != null) approveSendButton.setText("تأیید ارسال");
+    }
+
+    private void runVpnAction(boolean turnOn, String requestedName) {
+        String[] aliases;
+        if (requestedName != null && !requestedName.isEmpty() && !requestedName.equalsIgnoreCase("VPN"))
+            aliases = new String[]{requestedName, "VPN Star", "vpnstar", "Proton VPN", "1.1.1.1"};
+        else aliases = new String[]{"VPN Star", "vpnstar", "Proton VPN", "1.1.1.1", "VPN"};
+        if (tryLaunchByAliases(aliases)) {
+            addMessage("دستیار", "برنامهٔ VPN رو باز کردم؛ دارم وضعیت اتصال رو بررسی می‌کنم.");
+            mainHandler.postDelayed(() -> {
+                if (!AssistantAccessibilityService.isEnabled()) {
+                    addMessage("دستیار", "برای زدن دکمهٔ داخل VPN، دسترس‌پذیری رو فعال کن؛ الان می‌تونی دکمهٔ اتصال/قطع اتصال رو خودت بزنی.");
+                    runNextPlannedStep(); return;
+                }
+                if (turnOn) {
+                    if (AssistantAccessibilityService.hasVisibleText("Connected", "متصل", "اتصال برقرار است", "VPN is on", "Disconnect", "قطع اتصال")) {
+                        addMessage("دستیار", "به نظر می‌رسه VPN از قبل وصله."); runNextPlannedStep(); return;
+                    }
+                    boolean tapped = AssistantAccessibilityService.clickAnyVisibleText("Connect", "اتصال", "وصل شو", "فعال‌سازی", "Start", "شروع", "Connect VPN");
+                    if (tapped) addMessage("دستیار", "روی اتصال زدم. اگر پنجرهٔ تأیید خود اندروید اومد، خودت بررسی و تأییدش کن؛ این تأیید رو دور نمی‌زنم.");
+                    else addMessage("دستیار", "دکمهٔ اتصال رو پیدا نکردم. برنامه بازه؛ دکمهٔ Connect/اتصال رو خودت بزن.");
+                } else {
+                    boolean tapped = AssistantAccessibilityService.clickAnyVisibleText("Disconnect", "قطع اتصال", "قطع کن", "خاموش", "Disconnect VPN", "Stop");
+                    if (tapped) addMessage("دستیار", "روی قطع اتصال زدم.");
+                    else addMessage("دستیار", "دکمهٔ قطع اتصال پیدا نشد؛ از داخل برنامه VPN رو خاموش کن.");
+                }
+                mainHandler.postDelayed(this::runNextPlannedStep, 700);
+            }, 1100);
+        } else {
+            addMessage("دستیار", "برنامهٔ VPN رو پیدا نکردم. تنظیمات VPN باز می‌شه؛ بسته به گوشی ممکنه لازم باشه خودت سوئیچ رو بزنی.");
+            openVpn(turnOn ? "صفحهٔ VPN باز شد؛ اتصال رو بررسی کن." : "صفحهٔ VPN باز شد؛ قطع اتصال رو بررسی کن.");
+            mainHandler.postDelayed(this::runNextPlannedStep, 900);
+        }
+    }
+
+    private void stopPlannedQueue() { commandQueue.clear(); taskBusy = false; clearPendingSend(); }
+
+    private void handleLegacy(String raw) {
         String q=correctCommonTypos(normalize(raw));
         if(q.isEmpty())return;
         if (isVolumeUpCommand(q)) { adjustMediaVolume(AudioManager.ADJUST_RAISE, "صدای رسانه رو زیاد کردم."); return; }
@@ -350,6 +745,8 @@ public class FloatingService extends Service {
 
     @Override public int onStartCommand(Intent i,int flags,int startId) { return START_NOT_STICKY; }
     @Override public void onDestroy() {
+        releaseSpeechRecognizer();
+        mainHandler.removeCallbacksAndMessages(null);
         instance=null;
         if(wm!=null) { try{if(panel!=null&&panel.getParent()!=null)wm.removeView(panel);}catch(Exception ignored){} try{if(bubble!=null&&bubble.getParent()!=null)wm.removeView(bubble);}catch(Exception ignored){} }
         super.onDestroy();
