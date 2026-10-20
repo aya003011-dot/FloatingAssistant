@@ -19,10 +19,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          cmdline-tools-version: 12266719
+          gradle-version: '8.9'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: 15859902
 
       - name: Build APK
         run: gradle --no-daemon assembleDebug
@@ -32,3 +37,4 @@ jobs:
         with:
           name: FloatingAssistant-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
