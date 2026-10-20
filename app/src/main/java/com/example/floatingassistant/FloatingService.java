@@ -2,11 +2,15 @@ package com.example.floatingassistant;
 
 import android.app.Service;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.PixelFormat;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -23,23 +27,11 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import org.json.JSONArray;
-import org.json.JSONObject;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public class FloatingService extends Service {
     private WindowManager wm;
@@ -52,7 +44,6 @@ public class FloatingService extends Service {
     private boolean panelVisible = false;
     private int panelWidth = 320, panelHeight = 450;
     private static volatile FloatingService instance;
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
 
     private int dp(float n) { return (int)(n * getResources().getDisplayMetrics().density + 0.5f); }
 
@@ -105,7 +96,7 @@ public class FloatingService extends Service {
         ScrollView scroll = new ScrollView(this);
         messages = new LinearLayout(this); messages.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(messages); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        addMessage("دستیار", "سلام! می‌تونی بنویسی یا دکمهٔ 🎙 رو بزنی. نمونه: «برو تلگرام»، «برو گالری»، «برو VPN Star»، «برو تیک‌تاک». دکمهٔ ◉ پنجره رو مخفی می‌کنه و ✦ دوباره بازش می‌کنه.");
+        addMessage("دستیار", "سلام! ✦ فرمان‌های ساده و پاسخ‌های پایه آفلاین کار می‌کنن. برای صحبت صوتی روی 🎙 بزن؛ یک بار شروع و بار دوم پایان رو بزن. نمونه: «برو تلگرام»، «صدا رو زیاد کن»، «حاصل ۲ + ۳»، «ساعت چنده»، «سرچ کن آخرین اخبار». برای پاسخ آزاد شبیه ChatGPT باید مدل جداگانه دانلود بشه. ◉ پنجره رو مخفی می‌کنه و ✦ برمی‌گردونه.");
 
         LinearLayout entry = new LinearLayout(this); entry.setOrientation(LinearLayout.HORIZONTAL);
         input = new EditText(this); input.setSingleLine(true); input.setTextSize(14); input.setHint("دستورت رو بنویس...");
@@ -118,7 +109,7 @@ public class FloatingService extends Service {
         entry.addView(send, new LinearLayout.LayoutParams(dp(68), dp(48))); root.addView(entry);
 
         LinearLayout quick = new LinearLayout(this); quick.setOrientation(LinearLayout.HORIZONTAL);
-        addQuick(quick,"گالری","برو گالری"); addQuick(quick,"تلگرام","برو تلگرام"); addQuick(quick,"تیک‌تاک","برو تیک‌تاک");
+        addQuick(quick,"گالری","برو گالری"); addQuick(quick,"تلگرام","برو تلگرام"); addQuick(quick,"تیک‌تاک","برو تیک‌تاک"); addQuick(quick,"گوگل","گوگل");
         root.addView(quick);
         panel = root;
         int type = Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE;
@@ -170,6 +161,15 @@ public class FloatingService extends Service {
     private void handle(String raw) {
         String q=correctCommonTypos(normalize(raw));
         if(q.isEmpty())return;
+        if (isVolumeUpCommand(q)) { adjustMediaVolume(AudioManager.ADJUST_RAISE, "صدای رسانه رو زیاد کردم."); return; }
+        if (isVolumeDownCommand(q)) { adjustMediaVolume(AudioManager.ADJUST_LOWER, "صدای رسانه رو کم کردم."); return; }
+        if (isVolumeMuteCommand(q)) { adjustMediaVolume(AudioManager.ADJUST_MUTE, "صدای رسانه رو بی‌صدا کردم."); return; }
+        if (isVolumeUnmuteCommand(q)) { adjustMediaVolume(AudioManager.ADJUST_UNMUTE, "صدای رسانه رو از حالت بی‌صدا خارج کردم."); return; }
+        if (isScreenshotCommand(q)) {
+            if (AssistantAccessibilityService.takeScreenshot()) addMessage("دستیار", "درخواست اسکرین‌شات ارسال شد. بسته به نسخهٔ اندروید ممکنه پنل یا تأیید سیستمی نمایش داده بشه.");
+            else addMessage("دستیار", "اسکرین‌شات در دسترس نیست. اندروید ۹ یا جدیدتر و سرویس دسترس‌پذیری فعال لازم است.");
+            return;
+        }
         if(q.equals("مخفی")||q.contains("مخفی کن")||q.contains("پنجره رو مخفی")){ hidePanel(); addMessage("دستیار","مخفی شدم؛ روی ✦ بزن تا برگردم."); return; }
         if(q.equals("نمایش")||q.contains("برگرد به دستیار")){ showPanel(); return; }
         if(q.equals("برگرد")||q.equals("برگرد عقب")||q.equals("بازگشت")){ if(AssistantAccessibilityService.goBack())addMessage("دستیار","برگشتم عقب.");else addMessage("دستیار","سرویس دسترس‌پذیری رو از تنظیمات فعال کن."); return; }
@@ -178,6 +178,17 @@ public class FloatingService extends Service {
         if(q.startsWith("تایپ کن ")||q.startsWith("بنویس ")){ String text=q.startsWith("تایپ کن ")?q.substring(8).trim():q.substring(6).trim(); if(AssistantAccessibilityService.setFocusedText(text))addMessage("دستیار","متن رو در کادر فعلی وارد کردم.");else addMessage("دستیار","کادر متنی پیدا نشد یا سرویس دسترس‌پذیری فعال نیست."); return; }
         if(q.contains("وای فای")||q.contains("وای‌فای")||q.contains("wifi")){ openSettings(new Intent(Settings.ACTION_WIFI_SETTINGS),"تنظیمات وای‌فای رو باز کردم."); return; }
         if(q.contains("بلوتوث")){ openSettings(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS),"تنظیمات بلوتوث رو باز کردم."); return; }
+        // Offline-first answers are checked before generic app-name matching.
+        String localReply = OfflineBrain.reply(q);
+        if (localReply != null) { addMessage("دستیار", localReply); return; }
+        if (shouldSearchOnline(q)) {
+            if (hasInternetConnection()) {
+                openUrl("https://www.google.com/search?q=" + Uri.encode(raw.trim()), "جواب آفلاین آماده‌ای برای این سؤال ندارم؛ جستجوی گوگل رو باز کردم.");
+            } else {
+                addMessage("دستیار", "این سؤال به اطلاعات آنلاین نیاز داره. فعلاً آفلاین هستی؛ وقتی اینترنت وصل شد بگو «سرچ کن " + raw.trim() + "».");
+            }
+            return;
+        }
         if((q.contains("تیک‌تاک")||q.contains("tiktok"))&&(q.contains("سرچ")||q.contains("جستجو")||q.contains("search"))) { String term=extractSearch(q); if(!term.isEmpty()){openUrl("https://www.tiktok.com/search?q="+Uri.encode(term),"جستجوی تیک‌تاک برای «"+term+"» رو باز کردم.");return;} }
         if((q.contains("یوتیوب")||q.contains("youtube"))&&(q.contains("سرچ")||q.contains("جستجو")||q.contains("search"))) { String term=extractSearch(q); if(!term.isEmpty()){openUrl("https://www.youtube.com/results?search_query="+Uri.encode(term),"جستجوی یوتیوب برای «"+term+"» رو باز کردم.");return;} }
         if(q.contains("vpn")||q.contains("وی پی ان")||q.contains("وی‌پی‌ان")||q.contains("وی پی‌ان")||q.contains("وی‌پی ان")) {
@@ -201,12 +212,56 @@ public class FloatingService extends Service {
             if(term.isEmpty()) openAppOrUrl("com.google.android.youtube","https://www.youtube.com","یوتیوب رو باز کردم.");
             else openUrl("https://www.youtube.com/results?search_query="+Uri.encode(term),"جستجوی یوتیوب برای «"+term+"» رو باز کردم."); return;
         }
-        if(q.contains("گوگل")||q.contains("google")||q.startsWith("جستجو ")||q.startsWith("سرچ ")) { String term=extractSearch(q); if(term.isEmpty())openUrl("https://www.google.com","گوگل رو باز کردم.");else openUrl("https://www.google.com/search?q="+Uri.encode(term),"جستجوی گوگل برای «"+term+"» رو باز کردم."); return; }
+        if (q.equals("گوگل") || q.equals("google") || q.equals("برو گوگل") || q.equals("باز کن گوگل") || q.equals("open google")) { openUrl("https://www.google.com", "گوگل رو باز کردم."); return; }
+        if (q.startsWith("جستجو ") || q.startsWith("سرچ ") || q.contains("جستجو کن") || q.contains("سرچ کن") || q.startsWith("گوگل سرچ") || q.startsWith("در گوگل دنبال")) {
+            String term = extractSearch(q);
+            if (term.isEmpty()) openUrl("https://www.google.com", "گوگل رو باز کردم.");
+            else openUrl("https://www.google.com/search?q=" + Uri.encode(term), "جستجوی گوگل برای «" + term + "» رو باز کردم.");
+            return;
+        }
         if(q.contains("تیک‌تاک")||q.contains("tiktok")) { openAppOrUrl("com.zhiliaoapp.musically","https://www.tiktok.com","تیک‌تاک رو باز کردم."); return; }
         if(q.contains("گالری")||q.contains("عکس هام")||q.contains("عکس‌ها")||q.contains("عکس ها")) { if(tryLaunchByAliases(new String[]{"gallery","گالری","photos","تصاویر"}))addMessage("دستیار","گالری رو باز کردم.");else openAppOrUrl("com.google.android.apps.photos","https://photos.google.com","برنامهٔ عکس‌ها رو باز کردم."); return; }
         if(q.contains("تلگرام")||q.contains("telegram")) { if(tryLaunchByAliases(new String[]{"telegram","تلگرام"}))addMessage("دستیار","تلگرام رو باز کردم.");else openUrl("https://telegram.org","تلگرام نصب نیست یا پیدا نشد."); return; }
-        if(callAiBackend(q))return;
-        addMessage("دستیار","این فرمان رو دقیق نفهمیدم. می‌تونی بگی «برو + اسم برنامه». برای جواب‌های هوشمندتر، سرور هوش مصنوعی باید جداگانه راه‌اندازی و در تنظیمات وارد بشه.");
+        addMessage("دستیار", "این فرمان رو دقیق نفهمیدم. بگو «راهنما» تا نمونه فرمان‌ها رو ببینی، یا «سرچ کن ...» تا گوگل باز بشه.");
+    }
+
+    private boolean shouldSearchOnline(String q) {
+        if (q == null || q.trim().isEmpty()) return false;
+        String t = normalize(q);
+        // Do not turn an explicit app-launch command written with a question mark into a web search.
+        if (isAppOpenCommand(t) || t.startsWith("برو ") || t.startsWith("باز کن ")) return false;
+        if (t.endsWith("؟") || t.endsWith("?")) return true;
+        String[] starts = {"چی ", "چیست", "چیه", "چرا ", "چطور ", "چگونه ", "آیا ", "کجا ", "کی ", "کیه ", "چه ", "چند ", "کدوم ", "معنی ", "آخرین ", "جدیدترین ", "قیمت ", "اخبار ", "اطلاعات درباره ", "دربارهٔ ", "درباره ", "تاریخ پخش", "اسم واقعی", "چند قسمت", "چه سالی", "چه زمانی", "فصل ", "تاریخ انتشار"};
+        for (String prefix : starts) if (t.startsWith(prefix)) return true;
+        return t.contains("کی اومد") || t.contains("کی میاد") || t.contains("پخش شده") || t.contains("تاریخ انتشار") || t.contains("اومده") || t.contains("منتشر شده");
+    }
+
+    private boolean isVolumeUpCommand(String q) {
+        return q.contains("صدا رو زیاد") || q.contains("صدا را زیاد") || q.contains("صدای گوشی رو زیاد") ||
+                q.contains("صدای گوشی را زیاد") || q.contains("ولوم رو ببر بالا") || q.contains("ولوم را ببر بالا") ||
+                q.equals("بلندتر") || q.equals("volume up") || q.equals("increase volume") || q.equals("زیاد کردن صدا");
+    }
+    private boolean isVolumeDownCommand(String q) {
+        return q.contains("صدا رو کم") || q.contains("صدا را کم") || q.contains("صدای گوشی رو کم") ||
+                q.contains("صدای گوشی را کم") || q.contains("ولوم رو بیار پایین") || q.contains("ولوم را بیار پایین") ||
+                q.equals("آروم‌تر") || q.equals("volume down") || q.equals("decrease volume") || q.equals("کم کردن صدا");
+    }
+    private boolean isVolumeMuteCommand(String q) {
+        return q.equals("صدای رسانه رو قطع کن") || q.equals("صدای رسانه را قطع کن") || q.equals("mute media") || q.equals("بی‌صدا کردن رسانه");
+    }
+    private boolean isVolumeUnmuteCommand(String q) {
+        return q.equals("صدای رسانه رو وصل کن") || q.equals("صدای رسانه را وصل کن") || q.equals("unmute media");
+    }
+    private boolean isScreenshotCommand(String q) {
+        return q.contains("اسکرین شات") || q.contains("screenshot") || q.contains("عکس از صفحه") || q.contains("از صفحه عکس بگیر");
+    }
+    private void adjustMediaVolume(int direction, String successMessage) {
+        try {
+            AudioManager audio = (AudioManager)getSystemService(AUDIO_SERVICE);
+            if (audio == null) { addMessage("دستیار", "کنترل صدا در دسترس نیست."); return; }
+            audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI);
+            addMessage("دستیار", successMessage);
+        } catch (Exception e) { addMessage("دستیار", "نتونستم صدای رسانه رو تغییر بدم."); }
     }
 
     private boolean isMessageSendCommand(String q) { return (q.contains("پیام بده")||q.contains("پیام بفرست")||q.contains("ارسال پیام")||q.contains("send message")) && (q.contains("تلگرام")||q.contains("telegram")); }
@@ -264,62 +319,40 @@ public class FloatingService extends Service {
     private void openVpn(String msg) { try { Intent i=new Intent("android.settings.VPN_SETTINGS"); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); addMessage("دستیار",msg); } catch(Exception e) { openSettings(new Intent(Settings.ACTION_SETTINGS),"صفحهٔ اصلی تنظیمات باز شد؛ بخش VPN رو پیدا کن."); } }
     private void openAppOrUrl(String packageName,String url,String msg) { try { Intent i=getPackageManager().getLaunchIntentForPackage(packageName); if(i!=null){i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);startActivity(i);addMessage("دستیار",msg);}else openUrl(url,msg);}catch(Exception e){openUrl(url,msg);} }
     private void openUrl(String url,String msg) { try { Intent i=new Intent(Intent.ACTION_VIEW,Uri.parse(url)); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); addMessage("دستیار",msg); } catch(Exception e) { addMessage("دستیار","نتونستم اون صفحه رو باز کنم."); } }
-    private String extractSearch(String q) { String s=q; String[] words={"برو توی یوتیوب","برو تو یوتیوب","برو یوتیوب","داخل یوتیوب","توی یوتیوب","تو یوتیوب","youtube","you tube","برو توی تیک تاک","برو تو تیک تاک","تیک تاک","تیک‌تاک","tiktok","در یوتیوب","یوتیوب","گوگل","google","سرچ کن","جستجو کن","search for","search","جستجو","سرچ","لطفا","لطفاً","برو تو","برو"}; for(String w:words)s=s.replace(w," "); return s.replaceAll("\\s+"," ").trim(); }
-
-    private boolean callAiBackend(String command) {
-        SharedPreferences prefs=getSharedPreferences("assistant_settings",MODE_PRIVATE);
-        String base=prefs.getString("backend_url","").trim();
-        String token=prefs.getString("backend_token","").trim();
-        if(base.isEmpty())return false;
-        if(!base.startsWith("https://")) { addMessage("دستیار","آدرس سرور باید با https:// شروع بشه. کلید OpenAI رو داخل برنامه وارد نکن."); return true; }
-        addMessage("دستیار","دارم دستور رو با کمک هوش مصنوعی بررسی می‌کنم…");
-        network.execute(() -> {
-            HttpURLConnection conn=null;
-            try {
-                URL url=new URL(base.replaceAll("/+$","")+"/command");
-                conn=(HttpURLConnection)url.openConnection(); conn.setRequestMethod("POST"); conn.setConnectTimeout(12000); conn.setReadTimeout(20000); conn.setDoOutput(true); conn.setRequestProperty("Content-Type","application/json; charset=utf-8");
-                if(!token.isEmpty())conn.setRequestProperty("X-Assistant-Token",token);
-                JSONArray labels=new JSONArray(); List<ResolveInfo> apps=getLaunchableApps(); int count=0;
-                for(ResolveInfo ri:apps){ if(count++>=100)break; labels.put(String.valueOf(ri.loadLabel(getPackageManager()))); }
-                JSONObject body=new JSONObject(); body.put("text",command); body.put("installedApps",labels);
-                byte[] data=body.toString().getBytes(StandardCharsets.UTF_8); try(OutputStream os=conn.getOutputStream()){os.write(data);}
-                int code=conn.getResponseCode(); InputStream stream=code>=200&&code<300?conn.getInputStream():conn.getErrorStream();
-                StringBuilder result=new StringBuilder(); if(stream!=null)try(BufferedReader br=new BufferedReader(new InputStreamReader(stream,StandardCharsets.UTF_8))){String line;while((line=br.readLine())!=null)result.append(line);}
-                if(code<200||code>=300)throw new Exception("HTTP "+code);
-                JSONObject obj=new JSONObject(result.toString()); postToUi(() -> runAiAction(obj));
-            } catch(Exception e) { postToUi(() -> addMessage("دستیار","اتصال هوش مصنوعی برقرار نشد. نشانی سرور و اینترنت رو بررسی کن؛ فرمان‌های سادهٔ محلی هنوز کار می‌کنن.")); }
-            finally { if(conn!=null)conn.disconnect(); }
-        });
-        return true;
+    private String extractSearch(String q) {
+        String s = q;
+        String[] phrases = {
+                "برو توی یوتیوب", "برو تو یوتیوب", "برو یوتیوب", "داخل یوتیوب", "توی یوتیوب", "تو یوتیوب",
+                "برو توی تیک تاک", "برو تو تیک تاک", "در یوتیوب", "تیک‌تاک", "تیک تاک", "یوتیوب", "youtube", "you tube", "tiktok",
+                "در گوگل دنبال", "تو گوگل", "در گوگل", "گوگل سرچ", "جستجو کن", "سرچ کن", "search for",
+                "جستجو", "سرچ", "search", "گوگل", "google", "درباره ی", "دربارهٔ", "درباره",
+                "لطفا", "لطفاً", "برام", "برای من", "برو تو", "برو"
+        };
+        for (String phrase : phrases) s = s.replace(phrase, " ");
+        return s.replaceAll("\\s+", " ").trim();
     }
 
-    private void postToUi(Runnable task) { new Handler(Looper.getMainLooper()).post(task); }
-
-    private void runAiAction(JSONObject obj) {
-        String action=obj.optString("action","answer").toLowerCase(Locale.ROOT);
-        String app=obj.optString("app","").trim(); String text=obj.optString("text","").trim(); String message=obj.optString("message","").trim();
-        switch(action) {
-            case "open_app":
-                if(!app.isEmpty()&&tryLaunchByAliases(new String[]{app})) addMessage("دستیار",message.isEmpty()?"برنامهٔ "+app+" رو باز کردم.":message);
-                else addMessage("دستیار","برنامهٔ موردنظر پیدا نشد. اسمش رو دقیق‌تر بگو."); break;
-            case "click_text":
-                if(!text.isEmpty()&&AssistantAccessibilityService.clickVisibleText(text))addMessage("دستیار","روی «"+text+"» زدم.");else addMessage("دستیار","متن پیدا نشد یا دسترس‌پذیری فعال نیست."); break;
-            case "type_text":
-                if(!text.isEmpty()&&AssistantAccessibilityService.setFocusedText(text))addMessage("دستیار","متن در کادر فعال وارد شد. قبل از ارسال بررسیش کن.");else addMessage("دستیار","کادر متنی فعالی پیدا نشد یا دسترس‌پذیری فعال نیست."); break;
-            case "back": if(!AssistantAccessibilityService.goBack())addMessage("دستیار","برای برگشت، دسترس‌پذیری رو فعال کن."); break;
-            case "home": if(!AssistantAccessibilityService.goHome())addMessage("دستیار","برای رفتن به خانه، دسترس‌پذیری رو فعال کن."); break;
-            case "hide": hidePanel(); addMessage("دستیار","مخفی شدم؛ روی ✦ بزن تا برگردم."); break;
-            case "search_web": if(!text.isEmpty())openUrl("https://www.google.com/search?q="+Uri.encode(text),"دارم جستجو رو باز می‌کنم.");else addMessage("دستیار",message); break;
-            case "search_youtube": if(!text.isEmpty())openUrl("https://www.youtube.com/results?search_query="+Uri.encode(text),"دارم جستجوی یوتیوب رو باز می‌کنم.");else addMessage("دستیار",message); break;
-            default: addMessage("هوش مصنوعی",message.isEmpty()?text:message); break;
-        }
+    private boolean hasInternetConnection() {
+        try {
+            ConnectivityManager cm=(ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network n=cm.getActiveNetwork();
+                if (n == null) return false;
+                NetworkCapabilities caps=cm.getNetworkCapabilities(n);
+                return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            }
+            NetworkInfo info=cm.getActiveNetworkInfo();
+            return info != null && info.isConnected();
+        } catch (Exception e) { return false; }
     }
 
     @Override public int onStartCommand(Intent i,int flags,int startId) { return START_NOT_STICKY; }
     @Override public void onDestroy() {
         instance=null;
         if(wm!=null) { try{if(panel!=null&&panel.getParent()!=null)wm.removeView(panel);}catch(Exception ignored){} try{if(bubble!=null&&bubble.getParent()!=null)wm.removeView(bubble);}catch(Exception ignored){} }
-        network.shutdownNow(); super.onDestroy();
+        super.onDestroy();
     }
     @Override public IBinder onBind(Intent i) { return null; }
 }

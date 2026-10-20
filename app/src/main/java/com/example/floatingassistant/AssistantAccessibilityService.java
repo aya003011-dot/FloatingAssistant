@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.accessibility.AccessibilityEvent;
+import android.os.Build;
 import java.util.List;
 
 public class AssistantAccessibilityService extends AccessibilityService {
@@ -17,6 +18,11 @@ public class AssistantAccessibilityService extends AccessibilityService {
     public static boolean isEnabled() { return instance != null; }
     public static boolean goBack() { return instance != null && instance.performGlobalAction(GLOBAL_ACTION_BACK); }
     public static boolean goHome() { return instance != null && instance.performGlobalAction(GLOBAL_ACTION_HOME); }
+    public static boolean takeScreenshot() {
+        AssistantAccessibilityService s=instance;
+        if (s == null || Build.VERSION.SDK_INT < 28) return false;
+        return s.performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT);
+    }
     private AccessibilityNodeInfo externalRoot() {
         try {
             for (AccessibilityWindowInfo window : getWindows()) {
