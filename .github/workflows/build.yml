@@ -11,22 +11,42 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: 15859902
           packages: "platform-tools platforms;android-35 build-tools;35.0.0"
-      - name: Build APK
-        run: gradle --no-daemon assembleDebug
+
+      - name: Build APK and report errors
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon assembleDebug --stacktrace --info 2>&1 | tee build.log
+          result=${PIPESTATUS[0]}
+
+          if [ "$result" -ne 0 ]; then
+            {
+              echo "## Build error details"
+              echo '```text'
+              grep -n -B 3 -A 5 -E 'error:|symbol:|location:|What went wrong|FAILED|cannot find symbol|incompatible types|does not override|cannot be applied' build.log | tail -n 160 || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          exit "$result"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
