@@ -83,7 +83,7 @@ public class AssistantAccessibilityService extends AccessibilityService {
                 AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
                 if (focused == null) continue;
                 try {
-                    if (Build.VERSION.SDK_INT >= 30 && focused.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)) return true;
+                    if (Build.VERSION.SDK_INT >= 30 && focused.performAction(android.R.id.accessibilityActionImeEnter)) return true;
                     return false;
                 } finally { focused.recycle(); }
             } finally { root.recycle(); }
